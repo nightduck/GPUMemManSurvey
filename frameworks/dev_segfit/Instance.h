@@ -101,24 +101,6 @@ struct DeviceMemoryManager : MemoryManager
     return;
   }
 
-  // Doesn't modify elements of it
-  void inline bin_remove(block_t it) {
-    tlsf.ht[it.prev].next = it.next;
-    tlsf.ht[it.next].prev = it.prev;
-
-    // Head of list
-    if (it.prev == 0) {
-      tlsf.bins[get_order_rounddown(it.size)] = it.next;
-
-      // List now empty
-      if (it.next == 0) {
-        size_t unset_bit = 1L << get_order_rounddown(it.size);
-        tlsf.avail_bitmask &= ~unset_bit;
-      }
-    }
-    return;
-  }
-
   size_t inline get_order_roundup(size_t size) {
     return 8*sizeof(size_t) - __builtin_clzl(size - 1);
   }
@@ -171,7 +153,13 @@ struct DeviceMemoryManager : MemoryManager
       it.size = actual_size;
     } else {
       it = tlsf.ht[tlsf.bins[bin_idx]];
-      bin_remove(it);
+      tlsf.bins[bin_idx] = it.next;
+      tlsf.ht[it.next].prev = 0;
+      tlsf.ht[it.prev].next = 0;
+      if (it.next == 0) {
+        size_t unset_bit = 1L << get_order_rounddown(it.size);
+        tlsf.avail_bitmask &= ~unset_bit;
+      }
       it.prev = 0;
       it.next = 0;
       it.free = false;
@@ -179,7 +167,6 @@ struct DeviceMemoryManager : MemoryManager
 
     // it.size is what was requested, and size is the amount that was obtained from the heap
     if (size < it.size) {
-
       block_t new_block;
       new_block.size = it.size - size;
       new_block.free = true;
@@ -222,16 +209,22 @@ struct DeviceMemoryManager : MemoryManager
 
     // Coalesce
     if (left.free) {
-      bin_remove(left);
+      if (tlsf.bins[get_order_rounddown(left.size)] == left.addr) {
+        tlsf.bins[get_order_rounddown(left.size)] = left.next;
+        if (left.prev == left.next) {
+          size_t unset_bit = 1L << get_order_rounddown(left.size);
+          tlsf.avail_bitmask &= ~unset_bit;
+        }
+      }
       if (right.free) {
         left.size += it.size + right.size;
-
+        
         // Update the final block, if relevant
         if (right.addr == final_block_addr) {
           final_block_addr = left.addr;
         } else {
           // Update prev_adj of the block after the split
-          tlsf.ht[right.addr + right.size].prev_adj = left.addr;
+          tlsf.ht[right.addr + right.size].prev_adj = right.addr;
         }
 
         if (right.prev == right.next) {
@@ -246,16 +239,11 @@ struct DeviceMemoryManager : MemoryManager
       remove(tlsf, it);
       it = left;
     } else if (right.free) {
-      it.size += right.size;
-
-      // Update the final block, if relevant
-      if (right.addr == final_block_addr) {
-        final_block_addr = it.addr;
-      } else {
-        // Update prev_adj of the block after the split
-        tlsf.ht[right.addr + right.size].prev_adj = it.addr;
+      if (tlsf.bins[get_order_rounddown(it.size)] == it.addr) {
+        tlsf.bins[get_order_rounddown(it.size)] = it.next;
       }
-      
+      it.size += right.size;
+      tlsf.ht[right.addr + right.size].prev_adj = it.addr;
       if (right.prev == right.next) {
         size_t unset_bit = 1L << get_order_rounddown(right.size);
         tlsf.avail_bitmask &= ~unset_bit;
@@ -264,6 +252,8 @@ struct DeviceMemoryManager : MemoryManager
     }
 
     // Insert coalesced block into the appropriate bin
+    tlsf.ht[it.prev].next = it.next;
+    tlsf.ht[it.next].prev = it.prev;
     size_t bin_idx = get_order_rounddown(it.size);
     it.next = tlsf.bins[bin_idx];
     tlsf.ht[it.next].prev = it.addr;
