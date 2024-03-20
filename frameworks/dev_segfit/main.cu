@@ -3,6 +3,7 @@
 #include <iostream>
 #include <memory>
 #include <stdio.h>
+#include "nvToolsExt.h"
 
 #include "BasicInstance.cuh"
 #include "Instance.cuh"
@@ -19,10 +20,18 @@ typedef struct blob {
   void* addr;
 
   blob(MemoryManager *mm, size_t size) : size(size), mm(mm) {
+    nvtxRangePush("malloc");
     addr = mm->malloc(size);
+    nvtxRangePop();
   }
   ~blob() {
+    nvtxRangePush("free");
     mm->free(addr);
+    nvtxRangePop();
+  }
+  void write() {
+    int *d_test_array = reinterpret_cast<int*>(addr);
+    fill_values<<<1,1024>>>(d_test_array);
   }
 } blob_t;
 
@@ -56,7 +65,7 @@ int main(int argc, char* argv[])
   // std::cout << "Memory manager initialized" << std::endl;
 	// // testFunctions (memory_manager);
   // std::cout << "Test functions done" << std::endl;
-  static constexpr int kNumBuffers = 20;
+  static constexpr int kNumBuffers = 32;
   static constexpr size_t kMinBufferSize = 1024;
   static constexpr size_t kMaxBufferSize = 16 * 1024 * 1024;
   std::unique_ptr<blob_t> buffers[kNumBuffers];
@@ -65,13 +74,14 @@ int main(int argc, char* argv[])
   std::uniform_int_distribution<> size_distribution(kMinBufferSize, kMaxBufferSize);
   std::uniform_int_distribution<> buf_number_distribution(0, kNumBuffers - 1);
   
-  static constexpr int kNumIterations = 2000;
+  static constexpr int kNumIterations = 5000;
   const auto start = std::chrono::steady_clock::now();
   for (int i = 0; i < kNumIterations; ++i) {
     int buffer_idx = buf_number_distribution(gen);
     size_t new_size = size_distribution(gen);
-    // std::cout << buffer_idx << ":" << new_size << std::endl;
+    // std::cout << buffer_idx << "," << new_size << std::endl;
     buffers[buffer_idx] = std::make_unique<blob_t>(&memory_manager, new_size);
+    buffers[buffer_idx]->write();
   }
 
 	cudaDeviceSynchronize();

@@ -44,12 +44,14 @@ checkDrvError(CUresult res, const char *tok, const char *file, unsigned line)
 
 struct DeviceMemoryManager : MemoryManager
 {
-  CUdevice dev;             // CUDA device
+  // CUdevice dev;             // CUDA device
   CUcontext pctx;           // CUDA context
   CUdeviceptr heap;         // Pointer to the start of the memory region
   tlsf_t tlsf;              // Overhead 
   void * final_block_addr;  // Pointer to start of block that is adjacent to heap
   size_t granularity;       // Minimum size when calling cuMemCreate
+  cudaEvent_t freeEvent;    // Event to synchronize with
+  cudaEvent_t mallocEvent;  // Event to synchronize with
 	static constexpr size_t alignment{16ULL};
   // static constexpr size_t HEAP_MASK{1UL<<(sizeof(size_t)*8-1)};  // Largest power of 2
   static constexpr size_t HEAP_BIN{sizeof(size_t)*8-1};          // Set last bit
@@ -64,6 +66,9 @@ struct DeviceMemoryManager : MemoryManager
     CHECK_DRV(cuInit(0));
     CHECK_DRV(cuMemAddressReserve(&heap, instantiation_size, 0, 0, 0));
 
+    cudaEventCreateWithFlags(&mallocEvent, 1);
+    cudaEventCreateWithFlags(&freeEvent, 2);
+
     // Initialize tlsf table
     tlsf.bins.resize(sizeof(size_t)*8);
 
@@ -73,7 +78,7 @@ struct DeviceMemoryManager : MemoryManager
     CUmemAllocationProp prop = {};
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    prop.location.id = dev;
+    prop.location.id = 0;
     // accessDesc.location = prop.location;
     // accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     CHECK_DRV(cuMemGetAllocationGranularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
@@ -89,6 +94,8 @@ struct DeviceMemoryManager : MemoryManager
 	}
 	~DeviceMemoryManager(){
     // TODO: Free all memory
+    cudaEventDestroy(freeEvent);
+    cudaEventDestroy(mallocEvent);
   };
 
   void inline remove(tlsf_t &tlsf, block_t it) {
@@ -133,14 +140,14 @@ struct DeviceMemoryManager : MemoryManager
     CUmemAllocationProp prop = {};
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    prop.location.id = dev;
+    prop.location.id = 0;
     accessDesc.location = prop.location;
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
 
     size = ((size + granularity - 1) / granularity) * granularity;
 
     void * heap_start = final_block_addr + tlsf.ht[final_block_addr].size;
-    std::cout << "Requesting " << size << " bytes from heap at " << heap_start << std::endl;
+    // std::cout << "Requesting " << size << " bytes from heap at " << heap_start << std::endl;
     CHECK_DRV(cuMemCreate(&allocHandle, size, &prop, 0));
     CHECK_DRV(cuMemMap((CUdeviceptr)heap_start, size, 0ULL, allocHandle, 0ULL));
     CHECK_DRV(cuMemSetAccess((CUdeviceptr)heap_start, size, &accessDesc, 1ULL));
@@ -150,9 +157,9 @@ struct DeviceMemoryManager : MemoryManager
 
 	virtual __forceinline__ void* malloc(size_t size) override
 	{
-    dump_blocks();
-    sanity_check();
-    std::cout << "Mallocing " << std::hex << size << std::endl;
+    // dump_blocks();
+    // sanity_check();
+    // std::cout << "Mallocing " << std::hex << size << std::endl;
     uint64_t requested_bins = (1L << (8*sizeof(size_t)-1) >> __builtin_clzl(size - 1) - 1);
     requested_bins = tlsf.avail_bitmask & requested_bins;
     size_t bin_idx = __builtin_ctzl(requested_bins);
@@ -212,9 +219,9 @@ struct DeviceMemoryManager : MemoryManager
 
 	virtual __forceinline__ void free(void* ptr) override
 	{
-    dump_blocks();
-    sanity_check();
-    std::cout << "Freeing " << ptr << std::endl;
+    // dump_blocks();
+    // sanity_check();
+    // std::cout << "Freeing " << ptr << std::endl;
     const size_t top_idx = 1 << sizeof(size_t);
     auto& it = tlsf.ht[ptr];
     auto& left = tlsf.ht[it.prev_adj];
